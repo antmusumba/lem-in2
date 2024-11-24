@@ -6,216 +6,286 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"lem-in/pkg/parser"
+	"lem-in/pkg/simulator"
 )
 
-// Room represents a room in the ant farm.
+func main() {
+	if len(os.Args) != 2 {
+		fmt.Println("ERROR: invalid data format")
+		return
+	}
+
+	colony, err := parser.ParseInput(os.Args[1])
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	moves := simulator.SimulateMovement(colony)
+	for _, move := range moves {
+		fmt.Println(move)
+	}
+}
+
 type Room struct {
-	Name string
-	X    int
-	Y    int
-	Ants int // Number of ants currently in the room
+	Name    string
+	X       int
+	Y       int
+	IsStart bool
+	IsEnd   bool
 }
 
-// Tunnel represents a connection between two rooms.
 type Tunnel struct {
-	From *Room
-	To   *Room
+	From string
+	To   string
 }
 
-// Colony represents the entire ant farm structure.
 type Colony struct {
+	NumAnts int
 	Rooms   map[string]*Room
-	Tunnels []*Tunnel
-	Start   *Room
-	End     *Room
+	Tunnels []Tunnel
+	Start   string
+	End     string
+	Input   []string
 }
 
-// readInput reads the input file and constructs the colony structure.
-func readInput(filename string) (*Colony, error) {
+func newColony() *Colony {
+	return &Colony{
+		Rooms:   make(map[string]*Room),
+		Tunnels: make([]Tunnel, 0),
+		Input:   make([]string, 0),
+	}
+}
+
+func (c *Colony) parseInput(filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("ERROR: invalid data format")
 	}
 	defer file.Close()
 
-	colony := &Colony{
-		Rooms:   make(map[string]*Room),
-		Tunnels: make([]*Tunnel, 0),
+	scanner := bufio.NewScanner(file)
+
+	// First line must be number of ants
+	if !scanner.Scan() {
+		return fmt.Errorf("ERROR: invalid data format")
 	}
 
-	var currentSection string
+	antCount, err := strconv.Atoi(scanner.Text())
+	if err != nil || antCount <= 0 {
+		return fmt.Errorf("ERROR: invalid data format")
+	}
+	c.NumAnts = antCount
+	c.Input = append(c.Input, scanner.Text())
 
-	scanner := bufio.NewScanner(file)
+	var expectingStart, expectingEnd bool
+
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue // Skip empty lines and comments
+		line := scanner.Text()
+		c.Input = append(c.Input, line)
+
+		if line == "" {
+			continue
 		}
 
 		if line == "##start" {
-			currentSection = "start"
+			expectingStart = true
 			continue
-		} else if line == "##end" {
-			currentSection = "end"
+		}
+		if line == "##end" {
+			expectingEnd = true
 			continue
 		}
 
-		switch currentSection {
-		case "start":
-			room := parseRoom(line)
-			if room != nil {
-				colony.Start = room
-				colony.Rooms[room.Name] = room
-			}
-
-		case "end":
-			room := parseRoom(line)
-			if room != nil {
-				colony.End = room
-				colony.Rooms[room.Name] = room
-			}
-
-		default:
-			if strings.Contains(line, "-") { // Tunnel definition
-				tunnelParts := strings.Split(line, "-")
-				fromRoom := colony.Rooms[tunnelParts[0]]
-				toRoom := colony.Rooms[tunnelParts[1]]
-				if fromRoom == nil || toRoom == nil {
-					return nil, fmt.Errorf("invalid tunnel between %s and %s", tunnelParts[0], tunnelParts[1])
-				}
-				colony.Tunnels = append(colony.Tunnels, &Tunnel{From: fromRoom, To: toRoom})
-			} else { // Room definition for regular rooms (not start or end)
-				room := parseRoom(line)
-				if room != nil {
-					colony.Rooms[room.Name] = room
-				}
-			}
+		// Skip comments
+		if strings.HasPrefix(line, "#") {
+			continue
 		}
+
+		// Check if it's a tunnel definition
+		if strings.Contains(line, "-") {
+			parts := strings.Split(line, "-")
+			if len(parts) != 2 {
+				return fmt.Errorf("ERROR: invalid data format")
+			}
+
+			if _, exists := c.Rooms[parts[0]]; !exists {
+				return fmt.Errorf("ERROR: invalid data format")
+			}
+			if _, exists := c.Rooms[parts[1]]; !exists {
+				return fmt.Errorf("ERROR: invalid data format")
+			}
+
+			c.Tunnels = append(c.Tunnels, Tunnel{From: parts[0], To: parts[1]})
+			continue
+		}
+
+		// Must be a room definition
+		parts := strings.Fields(line)
+		if len(parts) != 3 {
+			return fmt.Errorf("ERROR: invalid data format")
+		}
+
+		name := parts[0]
+		if strings.HasPrefix(name, "L") || strings.HasPrefix(name, "#") {
+			return fmt.Errorf("ERROR: invalid data format")
+		}
+
+		x, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return fmt.Errorf("ERROR: invalid data format")
+		}
+
+		y, err := strconv.Atoi(parts[2])
+		if err != nil {
+			return fmt.Errorf("ERROR: invalid data format")
+		}
+
+		room := &Room{
+			Name:    name,
+			X:       x,
+			Y:       y,
+			IsStart: expectingStart,
+			IsEnd:   expectingEnd,
+		}
+
+		if expectingStart {
+			c.Start = name
+			expectingStart = false
+		} else if expectingEnd {
+			c.End = name
+			expectingEnd = false
+		}
+
+		c.Rooms[name] = room
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, err
+	if c.Start == "" {
+		return fmt.Errorf("ERROR: invalid data format")
+	}
+	if c.End == "" {
+		return fmt.Errorf("ERROR: invalid data format")
 	}
 
-	return colony, nil
+	return nil
 }
 
-// parseCoordinates parses room coordinates from a string.
-func parseCoordinates(coords string) (int, int, error) {
-	parts := strings.Fields(coords)
-	if len(parts) != 2 {
-		return 0, 0, fmt.Errorf("invalid coordinates format: %s", coords)
-	}
+type Path []string
 
-	x, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, 0, fmt.Errorf("invalid x-coordinate: %s", parts[0])
-	}
-	y, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return 0, 0, fmt.Errorf("invalid y-coordinate: %s", parts[1])
-	}
-	return x, y, nil
-}
-
-// parseRoom parses a room definition from a line.
-func parseRoom(line string) *Room {
-    parts := strings.Fields(line)
-    if len(parts) < 3 { // Check for at least three parts (name x y)
-        fmt.Printf("Invalid room format: %s (expected format: name x y)\n", line)
-        return nil // Return nil if invalid format
-    }
-
-    name := parts[0] // This will be a numeric string like "1", "2", etc.
-    xStr := parts[1]
-    yStr := parts[2]
-
-    x, y, _ := parseCoordinates(fmt.Sprintf("%s %s", xStr, yStr))
-    return &Room{Name: name, X: x, Y: y}
-}
-
-// findShortestPath finds the shortest path from start to end using BFS.
-func findShortestPath(colony *Colony) [][]*Room {
-	var paths [][]*Room
-
-	queue := [][]*Room{{colony.Start}}
+func (c *Colony) findPaths() []Path {
 	visited := make(map[string]bool)
+	var paths []Path
+	c.dfs(c.Start, visited, Path{c.Start}, &paths)
 
-	for len(queue) > 0 {
-	    path := queue[0]
-	    queue = queue[1:]
+	// Sort paths by length
+	for i := 0; i < len(paths)-1; i++ {
+		for j := i + 1; j < len(paths); j++ {
+			if len(paths[i]) > len(paths[j]) {
+				paths[i], paths[j] = paths[j], paths[i]
+			}
+		}
+	}
 
-	    currentRoom := path[len(path)-1]
-	    if currentRoom == colony.End {
-	        paths = append(paths, path)
-	        continue
-	    }
-
-	    visited[currentRoom.Name] = true
-
-	    for _, tunnel := range colony.Tunnels {
-	        if tunnel.From == currentRoom && !visited[tunnel.To.Name] {
-	            newPath := append([]*Room{}, path...)
-	            newPath = append(newPath, tunnel.To)
-	            queue = append(queue, newPath)
-	        }
-	    }
-    }
-
-	return paths // Return all found paths.
+	return paths
 }
 
-// moveAnts moves ants along the shortest paths found.
-func moveAnts(colony *Colony) []string {
-    paths := findShortestPath(colony)
+func (c *Colony) dfs(current string, visited map[string]bool, path Path, paths *[]Path) {
+	if current == c.End {
+		pathCopy := make(Path, len(path))
+		copy(pathCopy, path)
+		*paths = append(*paths, pathCopy)
+		return
+	}
 
-    // Check if any paths were found.
-    if len(paths) == 0 || len(paths[0]) <= 1 { // Ensure there's at least one valid path with more than one room.
-        return []string{"ERROR: No valid path found."}
-    }
+	visited[current] = true
+	defer delete(visited, current)
 
-    moves := []string{}
-    antCount := 3 // Example number of ants; this can be dynamically set.
+	for _, tunnel := range c.Tunnels {
+		next := ""
+		if tunnel.From == current {
+			next = tunnel.To
+		} else if tunnel.To == current {
+			next = tunnel.From
+		}
 
-    for i := 0; i < antCount; i++ {
-        moves = append(moves, fmt.Sprintf("L%d-%s", i+1, paths[0][1].Name)) // Move each ant along the first valid path.
-        for j := 2; j < len(paths[0]); j++ { 
-            moves = append(moves, fmt.Sprintf("L%d-%s", i+1, paths[0][j].Name))
-        }
-    }
-
-    return moves // Return all ant movements.
+		if next != "" && !visited[next] {
+			c.dfs(next, visited, append(path, next), paths)
+		}
+	}
 }
 
-// printResults prints the results of the simulation.
-func printResults(colony *Colony) {
-	fmt.Println(len(colony.Rooms)) // Number of rooms
-
-	for _, room := range colony.Rooms {
-	    fmt.Printf("%s %d %d\n", room.Name, room.X, room.Y)
-    }
-
-	for _, tunnel := range colony.Tunnels {
-	    fmt.Printf("%s-%s\n", tunnel.From.Name, tunnel.To.Name)
-    }
-
-	moves := moveAnts(colony)
-	for _, move := range moves {
-	    fmt.Println(move)
-    }
+type Ant struct {
+	ID       int
+	Path     Path
+	Position int
 }
 
-func main() {
-	if len(os.Args) < 2 {
-	    fmt.Println("Usage: go run . <input_file>")
-	    return
-    }
+func (c *Colony) simulateAntMovement() []string {
+	paths := c.findPaths()
+	if len(paths) == 0 {
+		return []string{"ERROR: invalid data format"}
+	}
 
-	colony, err := readInput(os.Args[1])
-	if err != nil {
-	    fmt.Println("ERROR:", err)
-	    return
-    }
+	// Print the input
+	for _, line := range c.Input {
+		fmt.Println(line)
+	}
+	fmt.Println()
 
-	printResults(colony)
+	var moves []string
+	ants := make([]*Ant, c.NumAnts)
+	for i := range ants {
+		ants[i] = &Ant{
+			ID:       i + 1,
+			Path:     paths[0],
+			Position: -1,
+		}
+	}
+
+	for {
+		turnMoves := make([]string, 0)
+		moveMade := false
+		roomOccupancy := make(map[string]bool)
+
+		// Try to move each ant
+		for _, ant := range ants {
+			if ant.Position == len(ant.Path)-1 {
+				continue // Ant has reached the end
+			}
+
+			var nextRoom string
+			if ant.Position == -1 {
+				nextRoom = ant.Path[0]
+			} else {
+				nextRoom = ant.Path[ant.Position+1]
+			}
+
+			// Check if room is available
+			if nextRoom != c.Start && nextRoom != c.End && roomOccupancy[nextRoom] {
+				continue
+			}
+
+			if ant.Position == -1 {
+				ant.Position = 0
+				turnMoves = append(turnMoves, fmt.Sprintf("L%d-%s", ant.ID, nextRoom))
+				moveMade = true
+				roomOccupancy[nextRoom] = true
+			} else {
+				ant.Position++
+				turnMoves = append(turnMoves, fmt.Sprintf("L%d-%s", ant.ID, nextRoom))
+				moveMade = true
+				roomOccupancy[nextRoom] = true
+			}
+		}
+
+		if !moveMade {
+			break
+		}
+
+		moves = append(moves, strings.Join(turnMoves, " "))
+	}
+
+	return moves
 }
